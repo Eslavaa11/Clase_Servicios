@@ -1,66 +1,145 @@
-using System; 
+using System;
 using System.Net;
-using System.Net.Sockets; 
+using System.Net.Sockets;
+using System.Text;
 using UnityEngine;
 
 public class TCPServer : MonoBehaviour
 {
-    private TcpListener tcpListener; // TCP server declaration
-    private TcpClient connectedClient; // Connected client declaration
-    private NetworkStream networkStream; // Network data stream
-    private byte[] receiveBuffer; // Buffer to store received data
+    private TcpListener tcpListener;
+    private TcpClient connectedClient;
+    private NetworkStream networkStream;
+    private byte[] receiveBuffer;
 
-    public bool isServerRunning;
+    public bool isServerRunning { get; private set; } = false;
+
+    /// Evento para notificar a la UI cuando llega texto
+    public event Action<string> OnMessageReceived;
+
+    private void OnDisable()         => StopServer();
+    private void OnApplicationQuit() => StopServer();
 
     public void StartServer(int port)
     {
-        tcpListener = new TcpListener(IPAddress.Any, port); // Configures the TCP server to listen on any IP and the specified port
-        tcpListener.Start(); // Starts the TCP server
-        Debug.Log("Server started, waiting for connections..."); // Displays a message in the Unity console indicating that the server has started
-        tcpListener.BeginAcceptTcpClient(HandleIncomingConnection, null); // Begins asynchronously accepting clients
-        isServerRunning = true;
-    }
+        if (isServerRunning) return;
 
-    private void HandleIncomingConnection(IAsyncResult result)
-    {
-        connectedClient = tcpListener.EndAcceptTcpClient(result); // Completes client acceptance and establishes the connection
-        networkStream = connectedClient.GetStream(); // Retrieves the network data stream from the connected client
-        Debug.Log("Client connected: " + connectedClient.Client.RemoteEndPoint); // Displays a message in the console indicating that a client has connected
-        receiveBuffer = new byte[connectedClient.ReceiveBufferSize]; // Initializes the reception buffer with the client's buffer size
-        networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null); // Begins asynchronously reading data from the network stream
-        tcpListener.BeginAcceptTcpClient(HandleIncomingConnection, null); // Continues waiting for new client connections asynchronously
-    }
-
-    private void ReceiveData(IAsyncResult result)
-    {
-        int bytesRead = networkStream.EndRead(result); // Completes reading data from the network stream and gets the number of bytes read
-        
-        if (bytesRead <= 0) // If no bytes are read, the client has disconnected
+        try
         {
-            Debug.Log("Client disconnected: " + connectedClient.Client.RemoteEndPoint); // Displays a message in the console indicating that the client has disconnected
-            connectedClient.Close(); // Closes the connection with the client
+            tcpListener = new TcpListener(IPAddress.Any, port);
+            tcpListener.Start();
+            isServerRunning = true;
+            Debug.Log($"[TCPServer] Started on port {port}. Waiting for connections...");
+            tcpListener.BeginAcceptTcpClient(HandleIncomingConnection, null);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[TCPServer] Start error: " + e.Message);
+            StopServer();
+        }
+    }
+
+    public void StopServer()
+    {
+        isServerRunning = false;
+
+        try { networkStream?.Close(); } catch { }
+        try { connectedClient?.Close(); } catch { }
+        try { tcpListener?.Stop(); } catch { }
+
+        networkStream = null;
+        connectedClient = null;
+        tcpListener = null;
+    }
+
+    private void HandleIncomingConnection(IAsyncResult ar)
+    {
+        if (!isServerRunning || tcpListener == null) return;
+
+        try
+        {
+            // Acepta cliente
+            connectedClient = tcpListener.EndAcceptTcpClient(ar);
+            networkStream = connectedClient.GetStream();
+            receiveBuffer = new byte[connectedClient.ReceiveBufferSize > 0 ? connectedClient.ReceiveBufferSize : 8192];
+
+            Debug.Log("[TCPServer] Client connected: " + connectedClient.Client.RemoteEndPoint);
+
+            // Empieza lectura del cliente aceptado
+            networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Listener parado
             return;
         }
-        byte[] receivedBytes = new byte[bytesRead]; // Copies the received data into a new byte array
-        Array.Copy(receiveBuffer, receivedBytes, bytesRead);
-        string receivedMessage = System.Text.Encoding.UTF8.GetString(receivedBytes); // Converts the received bytes into a text message
-        Debug.Log("Received from client: " + receivedMessage); // Displays the received message in the console
-        networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null); // Continues reading data from the network stream asynchronously
+        catch (Exception e)
+        {
+            Debug.LogError("[TCPServer] Accept error: " + e.Message);
+        }
+        finally
+        {
+            // Sigue aceptando nuevos clientes (si quieres 1 solo, elimina esta línea)
+            if (isServerRunning && tcpListener != null)
+            {
+                try { tcpListener.BeginAcceptTcpClient(HandleIncomingConnection, null); }
+                catch (Exception e) { Debug.LogError("[TCPServer] BeginAccept error: " + e.Message); }
+            }
+        }
+    }
+
+    private void ReceiveData(IAsyncResult ar)
+    {
+        try
+        {
+            if (networkStream == null) return;
+
+            int bytesRead = networkStream.EndRead(ar);
+            if (bytesRead <= 0)
+            {
+                Debug.Log("[TCPServer] Client disconnected.");
+                try { connectedClient?.Close(); } catch { }
+                connectedClient = null;
+                networkStream = null;
+                return;
+            }
+
+            var msg = Encoding.UTF8.GetString(receiveBuffer, 0, bytesRead);
+            Debug.Log("[TCPServer] Received: " + msg);
+
+            // Notifica a la UI (ChatUIManager se suscribe)
+            OnMessageReceived?.Invoke(msg);
+
+            // Sigue leyendo
+            networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null);
+        }
+        catch (ObjectDisposedException)
+        {
+            // stream cerrado
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[TCPServer] Receive error: " + e.Message);
+        }
     }
 
     public void SendData(string message)
     {
-        try{
-            byte[] sendBytes = System.Text.Encoding.UTF8.GetBytes(message); // Converts the message into a byte array
-            networkStream.Write(sendBytes, 0, sendBytes.Length); // Writes the bytes to the network stream to send them to the client
-            networkStream.Flush(); // Clears the data stream to ensure data is sent
-            Debug.Log("Sent to client: " + message); // Displays a message in the console indicating that the message has been sent
+        try
+        {
+            if (networkStream == null || connectedClient == null || !connectedClient.Connected)
+            {
+                Debug.LogWarning("[TCPServer] No client to send.");
+                return;
+            }
+
+            byte[] bytes = Encoding.UTF8.GetBytes(message);
+            networkStream.Write(bytes, 0, bytes.Length);
+            networkStream.Flush();
+            Debug.Log("[TCPServer] Sent: " + message);
         }
-        catch{
-            Debug.Log("There is no client to send the message: " + message);
+        catch (Exception e)
+        {
+            Debug.LogError("[TCPServer] Send error: " + e.Message);
         }
-        
     }
-
 }
-

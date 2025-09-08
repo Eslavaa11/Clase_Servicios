@@ -1,49 +1,111 @@
 using System;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using UnityEngine;
 
 public class TCPClient : MonoBehaviour
 {
-    private TcpClient tcpClient; // TCP client to connect to the server
-    private NetworkStream networkStream; // Network data stream for sending and receiving data
-    private byte[] receiveBuffer; // Buffer to store the data received from the server
+    private TcpClient tcpClient;
+    private NetworkStream networkStream;
+    private byte[] receiveBuffer;
 
-    public bool isServerConnected;
+    public bool isServerConnected { get; private set; } = false;
+
+    /// Evento para notificar a la UI cuando llega texto
+    public event Action<string> OnMessageReceived;
+
+    private void OnDisable()         => Disconnect();
+    private void OnApplicationQuit() => Disconnect();
 
     public void ConnectToServer(string ipAddress, int port)
     {
-        tcpClient = new TcpClient(); // Initializes the TCP client
-        tcpClient.Connect(IPAddress.Parse(ipAddress), port); // Connects the client to the server using the given IP address and port
-        networkStream = tcpClient.GetStream(); // Gets the network data stream for communication with the server
-        receiveBuffer = new byte[tcpClient.ReceiveBufferSize]; // Initializes the receive buffer with the client's buffer size
-        networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null); // Starts reading data from the network stream asynchronously
-        isServerConnected = true;
+        if (tcpClient != null && tcpClient.Connected) return;
+
+        try
+        {
+            tcpClient = new TcpClient();
+            tcpClient.Connect(IPAddress.Parse(ipAddress), port);
+
+            networkStream = tcpClient.GetStream();
+            receiveBuffer = new byte[tcpClient.ReceiveBufferSize > 0 ? tcpClient.ReceiveBufferSize : 8192];
+
+            isServerConnected = true;
+            Debug.Log($"[TCPClient] Connected to {ipAddress}:{port}");
+
+            networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[TCPClient] Connect error: " + e.Message);
+            Disconnect();
+        }
     }
 
-    private void ReceiveData(IAsyncResult result)
+    public void Disconnect()
     {
-        int bytesRead = networkStream.EndRead(result); // Completes the data reading from the network stream and gets the number of bytes read
-        byte[] receivedBytes = new byte[bytesRead]; // Copies the received data into a new byte array
-        Array.Copy(receiveBuffer, receivedBytes, bytesRead);
-        string receivedMessage = System.Text.Encoding.UTF8.GetString(receivedBytes); // Converts the received bytes into a text message
-        Debug.Log("Received from server: " + receivedMessage); // Displays the message received from the server in the console
-        networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null); // Continues reading data from the network stream asynchronously
+        isServerConnected = false;
+
+        try { networkStream?.Close(); } catch { }
+        try { tcpClient?.Close(); } catch { }
+
+        networkStream = null;
+        tcpClient = null;
+    }
+
+    private void ReceiveData(IAsyncResult ar)
+    {
+        try
+        {
+            if (networkStream == null) return;
+
+            int bytesRead = networkStream.EndRead(ar);
+            if (bytesRead <= 0)
+            {
+                Debug.Log("[TCPClient] Server closed connection.");
+                Disconnect();
+                return;
+            }
+
+            var msg = Encoding.UTF8.GetString(receiveBuffer, 0, bytesRead);
+            Debug.Log("[TCPClient] Received: " + msg);
+
+            // Notifica a la UI (ChatUIManager se suscribe)
+            OnMessageReceived?.Invoke(msg);
+
+            // Sigue leyendo
+            networkStream.BeginRead(receiveBuffer, 0, receiveBuffer.Length, ReceiveData, null);
+        }
+        catch (ObjectDisposedException)
+        {
+            // stream cerrado
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[TCPClient] Receive error: " + e.Message);
+            Disconnect();
+        }
     }
 
     public void SendData(string message)
     {
         try
         {
-            byte[] sendBytes = System.Text.Encoding.UTF8.GetBytes(message); // Converts the message into a byte array
-            networkStream.Write(sendBytes, 0, sendBytes.Length); // Writes the bytes to the network stream to send them to the client
-            networkStream.Flush(); // Clears the data stream to ensure data is sent
-            Debug.Log("Sent to client: " + message); // Displays a message in the console indicating that the message has been sent
+            if (networkStream == null || tcpClient == null || !tcpClient.Connected)
+            {
+                Debug.LogWarning("[TCPClient] Not connected; cannot send.");
+                return;
+            }
+
+            byte[] bytes = Encoding.UTF8.GetBytes(message);
+            networkStream.Write(bytes, 0, bytes.Length);
+            networkStream.Flush();
+            Debug.Log("[TCPClient] Sent: " + message);
         }
-        catch
+        catch (Exception e)
         {
-            Debug.Log("There is no client to send the message: " + message);
+            Debug.LogError("[TCPClient] Send error: " + e.Message);
+            Disconnect();
         }
     }
 }
-

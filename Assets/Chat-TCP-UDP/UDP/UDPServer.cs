@@ -1,38 +1,105 @@
 using System;
 using System.Net;
 using System.Net.Sockets;
-using TMPro;
+using System.Text;
 using UnityEngine;
-using UnityEngine.UI;
 
 public class UDPServer : MonoBehaviour
 {
-    private UdpClient udpServer; // UDP client to handle network communication
-    private IPEndPoint remoteEndPoint; // Endpoint to identify the remote client
+    private UdpClient udpServer;
+    private IPEndPoint anyEndPoint;            // para EndReceive
+    private IPEndPoint lastClientEndPoint;     // último cliente que habló
 
-    public bool isServerRunning = false; // Flag to check if the server is running
+    public bool isServerRunning = false;
+
+    /// Evento para notificar a la UI cuando llega texto
+    public event Action<string> OnMessageReceived;
+
+    private void OnDisable()         => StopUDPServer();
+    private void OnApplicationQuit() => StopUDPServer();
 
     public void StartUDPServer(int port)
     {
-        udpServer = new UdpClient(port); // Initializes the UDP client to listen on the given port
-        remoteEndPoint = new IPEndPoint(IPAddress.Any, port); // Configures the endpoint to accept messages from any IP address on the given port.
-        Debug.Log("Server started. Waiting for messages...");
-        udpServer.BeginReceive(ReceiveData, null); // Asynchronous data reception begins
-        isServerRunning = true; // Sets the server running flag to true
+        if (udpServer != null) return; // ya iniciado
+
+        try
+        {
+            udpServer = new UdpClient(port);
+            anyEndPoint = new IPEndPoint(IPAddress.Any, 0); // 0: aceptamos cualquier puerto del cliente
+            Debug.Log("[UDPServer] Started on port " + port);
+            udpServer.BeginReceive(ReceiveData, null);
+            isServerRunning = true;
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[UDPServer] Start error: " + e.Message);
+            StopUDPServer();
+        }
     }
 
-    private void ReceiveData(IAsyncResult result)
+    public void StopUDPServer()
     {
-        byte[] receivedBytes = udpServer.EndReceive(result, ref remoteEndPoint); // Completes data reception and gets the received bytes.
-        string receivedMessage = System.Text.Encoding.UTF8.GetString(receivedBytes); // Converts received bytes to a string
-        Debug.Log("Received from client: " + receivedMessage);
-        udpServer.BeginReceive(ReceiveData, null); // Continues to receive data asynchronously
+        try { udpServer?.Close(); } catch { }
+        udpServer = null;
+        isServerRunning = false;
+        lastClientEndPoint = null;
+    }
+
+    private void ReceiveData(IAsyncResult ar)
+    {
+        try
+        {
+            if (udpServer == null) return;
+
+            byte[] bytes = udpServer.EndReceive(ar, ref anyEndPoint);
+            lastClientEndPoint = anyEndPoint;               // recordamos el remitente
+            string msg = Encoding.UTF8.GetString(bytes);
+
+            Debug.Log("[UDPServer] Received: " + msg);
+            OnMessageReceived?.Invoke(msg);                 // notifica a la UI del servidor
+
+            
+        }
+        catch (ObjectDisposedException)
+        {
+            // socket cerrado
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[UDPServer] Receive error: " + e.Message);
+        }
+        finally
+        {
+            if (udpServer != null)
+            {
+                try { udpServer.BeginReceive(ReceiveData, null); }
+                catch (Exception e) { Debug.LogError("[UDPServer] BeginReceive error: " + e.Message); }
+            }
+        }
     }
 
     public void SendData(string message)
     {
-        byte[] sendBytes = System.Text.Encoding.UTF8.GetBytes(message); // Converts the message to a byte array
-        udpServer.Send(sendBytes, sendBytes.Length, remoteEndPoint); // Sends bytes to the remote client using UDP
-        Debug.Log("Sent to client: " + message);
+        if (udpServer == null)
+        {
+            Debug.LogWarning("[UDPServer] Send called but server not started.");
+            return;
+        }
+        if (lastClientEndPoint == null)
+        {
+            Debug.LogWarning("[UDPServer] No client endpoint yet. Envía después de recibir el primer mensaje del cliente.");
+            return;
+        }
+
+        try
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(message);
+            udpServer.Send(bytes, bytes.Length, lastClientEndPoint);
+            Debug.Log("[UDPServer] Sent: " + message);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[UDPServer] Send error: " + e.Message);
+        }
     }
 }
