@@ -33,14 +33,14 @@ public class ChatUIManager : MonoBehaviour
     [SerializeField] private bool  clampToViewport = true;
 
     [Header("Burbuja (imagen)")]
-    [SerializeField] private GameObject imageBubbleLocalPrefab;   // azul/local
-    [SerializeField] private GameObject imageBubbleRemotePrefab;  // gris/remoto
+    [SerializeField] private GameObject imageBubbleLocalPrefab;
+    [SerializeField] private GameObject imageBubbleRemotePrefab;
     [SerializeField] private float maxImageWidth  = 420f;
     [SerializeField] private float minImageWidth  = 120f;
     [SerializeField] private float imageEdgeMargin = 16f;
 
-    [Header("Burbuja (adjunto genérico)")]
-    [SerializeField] private GameObject attachmentBubbleLocalPrefab;   // con MediaRoot (Image/Video/Audio) + FileView
+    [Header("Burbuja (adjunto genérico / media)")]
+    [SerializeField] private GameObject attachmentBubbleLocalPrefab;   // contiene MediaRoot (Image/Video/Audio) + FileView
     [SerializeField] private GameObject attachmentBubbleRemotePrefab;
 
     // ---------- EVENTOS (opcionales) ----------
@@ -62,7 +62,6 @@ public class ChatUIManager : MonoBehaviour
     // Entrantes de red
     private readonly ConcurrentQueue<string> incoming = new ConcurrentQueue<string>();
 
-    // ---------------- Subcripción red ----------------
     private void OnEnable() {
         if (udpClient != null) udpClient.OnMessageReceived += EnqueueIncoming;
         if (udpServer != null) udpServer.OnMessageReceived += EnqueueIncoming;
@@ -75,10 +74,8 @@ public class ChatUIManager : MonoBehaviour
         if (tcpClient != null) tcpClient.OnMessageReceived -= EnqueueIncoming;
         if (tcpServer != null) tcpServer.OnMessageReceived -= EnqueueIncoming;
     }
-
     private void EnqueueIncoming(string text) => incoming.Enqueue(text);
 
-    // ---------------- Loop principal ----------------
     private void Update()
     {
         while (incoming.TryDequeue(out var payload))
@@ -97,7 +94,7 @@ public class ChatUIManager : MonoBehaviour
                 }
             }
 
-            // 2) Adjunto por ruta (video/audio/archivo). Útil para pruebas locales.
+            // 2) Adjunto por ruta (video/audio/archivo) — útil en editor si ambos comparten disco
             if (payload.StartsWith(FILE_PREFIX)) {
                 var parts = payload.Split('|'); // [file]|type|path|name
                 if (parts.Length >= 4) {
@@ -134,7 +131,7 @@ public class ChatUIManager : MonoBehaviour
         }
     }
 
-    // ---------------- Texto ----------------
+    // ======== TEXTO ========
     public void OnSendClicked()
     {
         if (!messageInput) return;
@@ -155,11 +152,11 @@ public class ChatUIManager : MonoBehaviour
         messageInput.ActivateInputField();
     }
 
-    // ---------------- Botón: Img (sólo imágenes) ----------------
+    // ======== IMG (sólo imágenes) ========
     public void OnPickAndSendImage()
     {
 #if UNITY_EDITOR
-        string path = EditorUtility.OpenFilePanel("Selecciona una imagen", "", "png,jpg,jpeg");
+        string path = EditorUtility.OpenFilePanel("Selecciona una imagen", "", "");
         if (string.IsNullOrEmpty(path)) return;
 
         byte[] fileBytes = File.ReadAllBytes(path);
@@ -176,7 +173,7 @@ public class ChatUIManager : MonoBehaviour
 #endif
     }
 
-    // ---------------- Botón: Adj (cualquier archivo) ----------------
+    // ======== ADJ (cualquier archivo) ========
     public void OnPickAndSendAttachment()
     {
 #if UNITY_EDITOR
@@ -193,35 +190,27 @@ public class ChatUIManager : MonoBehaviour
 
             ShowLocalImage(tex);
             ScrollToBottom();
-
-            string payload = EncodeImageToMessage(tex);
-            SendOverActiveStack(payload);
+            SendOverActiveStack(EncodeImageToMessage(tex));
             return;
         }
 
         if (IsVideo(ext)) {
             ShowLocalVideo(path);
             ScrollToBottom();
-
-            string payload = $"{FILE_PREFIX}{TYPE_VIDEO}|{path}|{name}";
-            SendOverActiveStack(payload);
+            SendOverActiveStack($"{FILE_PREFIX}{TYPE_VIDEO}|{path}|{name}");
             return;
         }
 
         if (IsAudio(ext)) {
             ShowLocalAudio(path, name);
             ScrollToBottom();
-
-            string payload = $"{FILE_PREFIX}{TYPE_AUDIO}|{path}|{name}";
-            SendOverActiveStack(payload);
+            SendOverActiveStack($"{FILE_PREFIX}{TYPE_AUDIO}|{path}|{name}");
             return;
         }
 
         ShowLocalFileCard(path, name);
         ScrollToBottom();
-
-        string genericPayload = $"{FILE_PREFIX}{TYPE_FILE}|{path}|{name}";
-        SendOverActiveStack(genericPayload);
+        SendOverActiveStack($"{FILE_PREFIX}{TYPE_FILE}|{path}|{name}");
 #else
         Debug.LogWarning("En build usa un file picker y manda rutas/bytes según tipo.");
 #endif
@@ -235,7 +224,7 @@ public class ChatUIManager : MonoBehaviour
         if (tcpServer != null) tcpServer.SendData(payload);
     }
 
-    // ---------------- Mostrar IMAGEN ----------------
+    // ======== IMAGEN ========
     private void ShowLocalImage(Texture2D tex)    => SpawnImageBubble(true,  tex);
     private void ShowIncomingImage(Texture2D tex) => SpawnImageBubble(false, tex);
 
@@ -250,7 +239,7 @@ public class ChatUIManager : MonoBehaviour
         FitImageBubble(go, tex.width, tex.height);
     }
 
-    // ---------------- Mostrar VIDEO ----------------
+    // ======== VIDEO ========
     private void ShowLocalVideo(string path)    => SpawnVideoBubble(true,  path);
     private void ShowIncomingVideo(string path) => SpawnVideoBubble(false, path);
 
@@ -260,16 +249,12 @@ public class ChatUIManager : MonoBehaviour
         if (!prefab) { Debug.LogWarning("AttachmentBubble prefab no asignado."); return; }
 
         var go = Instantiate(prefab, content);
-
-        // Sólo VideoView (apaga lo demás)
         ToggleExclusiveView(go, "VideoView");
 
         var videoView = go.transform.Find("Content/MediaRoot/VideoView");
         var raw = videoView.GetComponent<RawImage>();
         if (!raw) raw = videoView.gameObject.AddComponent<RawImage>();
-
-        // *** IMPORTANTE: debe quedar en true para recibir clics/hover cuando el overlay esté oculto
-        raw.raycastTarget = true;
+        raw.raycastTarget = false;
 
         var vp = videoView.GetComponent<VideoPlayer>();
         if (!vp) vp = videoView.gameObject.AddComponent<VideoPlayer>();
@@ -278,13 +263,12 @@ public class ChatUIManager : MonoBehaviour
         vp.source      = VideoSource.Url;
         vp.url         = path;
 
-        // RT placeholder diminuto
-        var rtPlaceholder = new RenderTexture(4, 4, 0, RenderTextureFormat.ARGB32);
+        // placeholder mínimo
+        var rtTiny = new RenderTexture(4, 4, 0, RenderTextureFormat.ARGB32);
         vp.renderMode    = VideoRenderMode.RenderTexture;
-        vp.targetTexture = rtPlaceholder;
-        raw.texture      = rtPlaceholder;
+        vp.targetTexture = rtTiny;
+        raw.texture      = rtTiny;
 
-        // Tamaño provisional 16:9
         FitImageBubble(go, 640, 360);
 
         vp.prepareCompleted += _ => {
@@ -302,11 +286,36 @@ public class ChatUIManager : MonoBehaviour
         vp.Prepare();
     }
 
-    // ---------------- AUDIO y FILE CARD ----------------
-    private void ShowLocalAudio   (string path, string name) => SpawnFileCard(true,  path, name, TYPE_AUDIO);
-    private void ShowIncomingAudio(string path, string name) => SpawnFileCard(false, path, name, TYPE_AUDIO);
+    // ======== AUDIO ========
+    private void ShowLocalAudio(string path, string name)    => SpawnAudioBubble(true,  path, name);
+    private void ShowIncomingAudio(string path, string name) => SpawnAudioBubble(false, path, name);
 
-    private void ShowLocalFileCard   (string path, string name) => SpawnFileCard(true,  path, name, TYPE_FILE);
+    private void SpawnAudioBubble(bool local, string path, string name)
+    {
+        var prefab = local ? attachmentBubbleLocalPrefab : attachmentBubbleRemotePrefab;
+        if (!prefab) { Debug.LogWarning("AttachmentBubble prefab no asignado."); return; }
+
+        var go = Instantiate(prefab, content);
+        ToggleExclusiveView(go, "AudioView");
+
+        // Referencias dentro del AudioView
+        var audioView = go.transform.Find("Content/MediaRoot/AudioView");
+        if (!audioView) { Debug.LogWarning("AudioView no encontrado en el prefab."); return; }
+
+        var src = audioView.GetComponent<AudioSource>() ?? audioView.gameObject.AddComponent<AudioSource>();
+        src.playOnAwake = false;
+        src.loop        = false;
+
+        var ctrl = audioView.GetComponent<AudioBubbleController>() ?? audioView.gameObject.AddComponent<AudioBubbleController>();
+        // El controlador auto-resuelve PlayButton/Progress/TimeTxt si no los llenas
+        ctrl.LoadFromPath(path, name);
+
+        // Un tamaño agradable de tarjeta de audio
+        FitImageBubble(go, 640, 120);
+    }
+
+    // ======== FILE CARD (genérico) ========
+    private void ShowLocalFileCard(string path, string name)    => SpawnFileCard(true,  path, name, TYPE_FILE);
     private void ShowIncomingFileCard(string path, string name) => SpawnFileCard(false, path, name, TYPE_FILE);
 
     private void SpawnFileCard(bool local, string path, string name, string kind)
@@ -315,7 +324,6 @@ public class ChatUIManager : MonoBehaviour
         if (!prefab) { Debug.LogWarning("AttachmentBubble prefab no asignado."); return; }
 
         var go = Instantiate(prefab, content);
-
         ToggleExclusiveView(go, "FileView");
 
         var nameTxt = go.transform.Find("Content/FileView/FileName")?.GetComponent<TMP_Text>();
@@ -330,7 +338,7 @@ public class ChatUIManager : MonoBehaviour
         FitImageBubble(go, 640, 360);
     }
 
-    // ---------------- Serializar imagen ----------------
+    // ========= Serializar imagen =========
     private string EncodeImageToMessage(Texture2D original)
     {
         var tex = original;
@@ -342,13 +350,12 @@ public class ChatUIManager : MonoBehaviour
         return $"{IMG_PREFIX}{tex.width}|{tex.height}|{b64}";
     }
 
-    // ---------------- Utilidades UI ----------------
+    // ========= UTILIDADES UI =========
     private void ScrollToBottom() {
         Canvas.ForceUpdateCanvases();
         if (scrollRect) scrollRect.verticalNormalizedPosition = 0f;
     }
 
-    // Texto
     private void FitBubble(GameObject bubbleGO)
     {
         if (!bubbleGO) return;
@@ -391,7 +398,6 @@ public class ChatUIManager : MonoBehaviour
         LayoutRebuilder.ForceRebuildLayoutImmediate(bubbleGO.GetComponent<RectTransform>());
     }
 
-    // Imagen / Video (ancho disponible + aspecto)
     private void FitImageBubble(GameObject bubbleGO, int mediaW, int mediaH)
     {
         if (!bubbleGO) return;
@@ -417,6 +423,7 @@ public class ChatUIManager : MonoBehaviour
         float aspect  = (mediaH <= 0 || mediaW <= 0) ? 1f : (float)mediaH / mediaW;
         float targetH = targetW * aspect;
 
+        // coge el RawImage visible (image/video)
         RawImage raw = null;
         var raws = bubbleGO.GetComponentsInChildren<RawImage>(true);
         foreach (var r in raws) if (r.gameObject.activeInHierarchy) { raw = r; break; }
@@ -450,17 +457,17 @@ public class ChatUIManager : MonoBehaviour
         RenderTexture.active = rt;
         tex.ReadPixels(new Rect(0, 0, tw, th), 0, 0);
         tex.Apply();
-
         RenderTexture.active = null;
+
         return tex;
     }
 
-    // Helpers de tipo
+    // Helpers
     private static bool IsImage(string ext) => ext==".png"||ext==".jpg"||ext==".jpeg";
     private static bool IsVideo(string ext) => ext==".mp4"||ext==".mov"||ext==".avi"||ext==".mkv"||ext==".webm";
     private static bool IsAudio(string ext) => ext==".wav"||ext==".mp3"||ext==".ogg"||ext==".m4a"||ext==".aac";
 
-    // Activa exclusivamente 1 vista de MediaRoot (u "FileView") y apaga lo demás
+    // Activa exclusivamente 1 vista de MediaRoot (o "FileView") y apaga el resto
     private void ToggleExclusiveView(GameObject root, string viewName)
     {
         var contentT  = root.transform.Find("Content");
