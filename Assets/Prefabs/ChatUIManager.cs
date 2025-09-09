@@ -8,7 +8,7 @@ using System.IO;
 using UnityEngine.Video;
 
 #if UNITY_EDITOR
-using UnityEditor; // OpenFilePanel
+using UnityEditor;
 #endif
 
 public class ChatUIManager : MonoBehaviour
@@ -53,7 +53,7 @@ public class ChatUIManager : MonoBehaviour
 
     // Protocolo simple
     private const string IMG_PREFIX  = "[img]|";      // [img]|w|h|<base64>
-    private const string FILE_PREFIX = "[file]|";     // [file]|<type>|<path>|<name>
+    private const string FILE_PREFIX = "[file]|";     // [file]|type|path|name
     private const string TYPE_IMAGE  = "image";
     private const string TYPE_VIDEO  = "video";
     private const string TYPE_AUDIO  = "audio";
@@ -97,7 +97,7 @@ public class ChatUIManager : MonoBehaviour
                 }
             }
 
-            // 2) Adjunto por ruta (video/audio/archivo). Útil para tus pruebas locales.
+            // 2) Adjunto por ruta (video/audio/archivo). Útil para pruebas locales.
             if (payload.StartsWith(FILE_PREFIX)) {
                 var parts = payload.Split('|'); // [file]|type|path|name
                 if (parts.Length >= 4) {
@@ -155,7 +155,7 @@ public class ChatUIManager : MonoBehaviour
         messageInput.ActivateInputField();
     }
 
-    // ---------------- Botón: Img (SOLO imágenes) ----------------
+    // ---------------- Botón: Img (sólo imágenes) ----------------
     public void OnPickAndSendImage()
     {
 #if UNITY_EDITOR
@@ -186,7 +186,6 @@ public class ChatUIManager : MonoBehaviour
         string ext  = Path.GetExtension(path).ToLowerInvariant();
         string name = Path.GetFileName(path);
 
-        // a) Imágenes embebidas
         if (IsImage(ext)) {
             byte[] fileBytes = File.ReadAllBytes(path);
             var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
@@ -200,7 +199,6 @@ public class ChatUIManager : MonoBehaviour
             return;
         }
 
-        // b) Video por ruta (ambas UIs locales lo pueden reproducir)
         if (IsVideo(ext)) {
             ShowLocalVideo(path);
             ScrollToBottom();
@@ -210,7 +208,6 @@ public class ChatUIManager : MonoBehaviour
             return;
         }
 
-        // c) Audio
         if (IsAudio(ext)) {
             ShowLocalAudio(path, name);
             ScrollToBottom();
@@ -220,7 +217,6 @@ public class ChatUIManager : MonoBehaviour
             return;
         }
 
-        // d) Otros: tarjeta genérica
         ShowLocalFileCard(path, name);
         ScrollToBottom();
 
@@ -264,11 +260,16 @@ public class ChatUIManager : MonoBehaviour
         if (!prefab) { Debug.LogWarning("AttachmentBubble prefab no asignado."); return; }
 
         var go = Instantiate(prefab, content);
-        ToggleViews(go, image:false, video:true, audio:false, file:false);
+
+        // Sólo VideoView (apaga lo demás)
+        ToggleExclusiveView(go, "VideoView");
 
         var videoView = go.transform.Find("Content/MediaRoot/VideoView");
         var raw = videoView.GetComponent<RawImage>();
         if (!raw) raw = videoView.gameObject.AddComponent<RawImage>();
+
+        // *** IMPORTANTE: debe quedar en true para recibir clics/hover cuando el overlay esté oculto
+        raw.raycastTarget = true;
 
         var vp = videoView.GetComponent<VideoPlayer>();
         if (!vp) vp = videoView.gameObject.AddComponent<VideoPlayer>();
@@ -277,22 +278,31 @@ public class ChatUIManager : MonoBehaviour
         vp.source      = VideoSource.Url;
         vp.url         = path;
 
-        // RenderTexture correcto (ancho, alto, depth, formato)
-        var rt = new RenderTexture(512, 512, 0, RenderTextureFormat.ARGB32);
+        // RT placeholder diminuto
+        var rtPlaceholder = new RenderTexture(4, 4, 0, RenderTextureFormat.ARGB32);
         vp.renderMode    = VideoRenderMode.RenderTexture;
-        vp.targetTexture = rt;
-        raw.texture      = rt;
+        vp.targetTexture = rtPlaceholder;
+        raw.texture      = rtPlaceholder;
+
+        // Tamaño provisional 16:9
+        FitImageBubble(go, 640, 360);
 
         vp.prepareCompleted += _ => {
             int w = Mathf.Max(1, (int)vp.width);
             int h = Mathf.Max(1, (int)vp.height);
-            FitImageBubble(go, w, h); // reutiliza ajuste de imágenes
+
+            if (vp.targetTexture != null) { vp.targetTexture.Release(); Destroy(vp.targetTexture); }
+            var rt = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32);
+            vp.targetTexture = rt;
+            raw.texture      = rt;
+
+            FitImageBubble(go, w, h);
             vp.Play();
         };
         vp.Prepare();
     }
 
-    // ---------------- Mostrar AUDIO / FILE CARD ----------------
+    // ---------------- AUDIO y FILE CARD ----------------
     private void ShowLocalAudio   (string path, string name) => SpawnFileCard(true,  path, name, TYPE_AUDIO);
     private void ShowIncomingAudio(string path, string name) => SpawnFileCard(false, path, name, TYPE_AUDIO);
 
@@ -305,7 +315,8 @@ public class ChatUIManager : MonoBehaviour
         if (!prefab) { Debug.LogWarning("AttachmentBubble prefab no asignado."); return; }
 
         var go = Instantiate(prefab, content);
-        ToggleViews(go, image:false, video:false, audio:false, file:true);
+
+        ToggleExclusiveView(go, "FileView");
 
         var nameTxt = go.transform.Find("Content/FileView/FileName")?.GetComponent<TMP_Text>();
         if (nameTxt) nameTxt.text = string.IsNullOrEmpty(name) ? Path.GetFileName(path) : name;
@@ -316,7 +327,6 @@ public class ChatUIManager : MonoBehaviour
             btn.onClick.AddListener(() => Application.OpenURL("file://" + path));
         }
 
-        // tamaño agradable de tarjeta
         FitImageBubble(go, 640, 360);
     }
 
@@ -354,8 +364,9 @@ public class ChatUIManager : MonoBehaviour
 
         float hardMax = clampToViewport ? Mathf.Min(available, maxBubbleWidth) : maxBubbleWidth;
 
-        var bubbleHLG = bubbleGO.GetComponent<HorizontalLayoutGroup>();
-        float innerPad = bubbleHLG != null ? (bubbleHLG.padding.left + bubbleHLG.padding.right) : 0f;
+        var hlg = bubbleGO.GetComponent<HorizontalLayoutGroup>();
+        float padH = hlg != null ? (hlg.padding.left + hlg.padding.right) : 0f;
+        float padV = hlg != null ? (hlg.padding.top  + hlg.padding.bottom) : 0f;
 
         var text = bubbleGO.GetComponentInChildren<TMP_Text>(true);
         if (!text) return;
@@ -365,23 +376,23 @@ public class ChatUIManager : MonoBehaviour
         text.ForceMeshUpdate();
 
         float naturalWidth = text.preferredWidth;
-        float maxLine = Mathf.Max(minLineWidth, hardMax - innerPad);
+        float maxLine = Mathf.Max(minLineWidth, hardMax - padH);
         float targetLineWidth = Mathf.Clamp(naturalWidth, minLineWidth, maxLine);
 
         var textLE = text.GetComponent<LayoutElement>() ?? text.gameObject.AddComponent<LayoutElement>();
         textLE.preferredWidth = targetLineWidth;
         textLE.flexibleWidth  = 0f;
 
-        var bubbleLE = bubbleGO.GetComponent<LayoutElement>() ?? bubbleGO.AddComponent<LayoutElement>();
-        bubbleLE.preferredWidth = targetLineWidth + innerPad;
-        bubbleLE.flexibleWidth  = 0f;
-        bubbleLE.minWidth       = 0f;
+        var rootLE = bubbleGO.GetComponent<LayoutElement>() ?? bubbleGO.AddComponent<LayoutElement>();
+        rootLE.preferredWidth  = targetLineWidth + padH;
+        rootLE.preferredHeight = text.preferredHeight + padV;
+        rootLE.flexibleWidth   = 0f;
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(bubbleGO.GetComponent<RectTransform>());
     }
 
-    // Imagen / Video (ancho disponible + aspecto). Funciona con ImageBubble y AttachmentBubble.
-    private void FitImageBubble(GameObject bubbleGO, int imgW, int imgH)
+    // Imagen / Video (ancho disponible + aspecto)
+    private void FitImageBubble(GameObject bubbleGO, int mediaW, int mediaH)
     {
         if (!bubbleGO) return;
 
@@ -397,20 +408,19 @@ public class ChatUIManager : MonoBehaviour
         float hardMax = Mathf.Min(available, maxImageWidth);
 
         var hlg = bubbleGO.GetComponent<HorizontalLayoutGroup>();
-        float innerPad = hlg != null ? (hlg.padding.left + hlg.padding.right) : 0f;
+        float padH = hlg != null ? (hlg.padding.left + hlg.padding.right) : 0f;
+        float padV = hlg != null ? (hlg.padding.top  + hlg.padding.bottom) : 0f;
 
-        float maxLine = Mathf.Max(minImageWidth, hardMax - innerPad);
-        float targetW = Mathf.Clamp(imgW, minImageWidth, maxLine);
+        float maxLine = Mathf.Max(minImageWidth, hardMax - padH);
+        float targetW = Mathf.Clamp(mediaW, minImageWidth, maxLine);
 
-        float aspect  = (imgH <= 0 || imgW <= 0) ? 1f : (float)imgH / imgW;
+        float aspect  = (mediaH <= 0 || mediaW <= 0) ? 1f : (float)mediaH / mediaW;
         float targetH = targetW * aspect;
 
-        // Busca el RawImage activo (sirve para ImageBubble y para VideoView)
         RawImage raw = null;
         var raws = bubbleGO.GetComponentsInChildren<RawImage>(true);
-        foreach (var r in raws)
-            if (r.gameObject.activeInHierarchy) { raw = r; break; }
-        if (raw == null && raws.Length > 0) raw = raws[0]; // fallback por si está desactivado
+        foreach (var r in raws) if (r.gameObject.activeInHierarchy) { raw = r; break; }
+        if (raw == null && raws.Length > 0) raw = raws[0];
 
         if (raw) {
             var le  = raw.GetComponent<LayoutElement>() ?? raw.gameObject.AddComponent<LayoutElement>();
@@ -421,8 +431,9 @@ public class ChatUIManager : MonoBehaviour
         }
 
         var rootLE = bubbleGO.GetComponent<LayoutElement>() ?? bubbleGO.AddComponent<LayoutElement>();
-        rootLE.preferredWidth = targetW + innerPad;
-        rootLE.flexibleWidth  = 0f;
+        rootLE.preferredWidth  = targetW + padH;
+        rootLE.preferredHeight = targetH + padV;
+        rootLE.flexibleWidth   = 0f;
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(bubbleGO.GetComponent<RectTransform>());
     }
@@ -441,24 +452,26 @@ public class ChatUIManager : MonoBehaviour
         tex.Apply();
 
         RenderTexture.active = null;
-        RenderTexture.ReleaseTemporary(rt);
         return tex;
     }
 
-    // Helpers
+    // Helpers de tipo
     private static bool IsImage(string ext) => ext==".png"||ext==".jpg"||ext==".jpeg";
     private static bool IsVideo(string ext) => ext==".mp4"||ext==".mov"||ext==".avi"||ext==".mkv"||ext==".webm";
     private static bool IsAudio(string ext) => ext==".wav"||ext==".mp3"||ext==".ogg"||ext==".m4a"||ext==".aac";
 
-    private void ToggleViews(GameObject root, bool image, bool video, bool audio, bool file)
+    // Activa exclusivamente 1 vista de MediaRoot (u "FileView") y apaga lo demás
+    private void ToggleExclusiveView(GameObject root, string viewName)
     {
-        void Set(string path, bool on){
-            var t = root.transform.Find(path);
-            if (t) t.gameObject.SetActive(on);
+        var contentT  = root.transform.Find("Content");
+        var mediaRoot = contentT ? contentT.Find("MediaRoot") : null;
+        if (mediaRoot)
+        {
+            for (int i = 0; i < mediaRoot.childCount; i++)
+                mediaRoot.GetChild(i).gameObject.SetActive(mediaRoot.GetChild(i).name == viewName);
         }
-        Set("Content/MediaRoot/ImageView", image);
-        Set("Content/MediaRoot/VideoView", video);
-        Set("Content/MediaRoot/AudioView", audio);
-        Set("Content/FileView",           file);
+
+        var fileView = contentT ? contentT.Find("FileView") : null;
+        if (fileView) fileView.gameObject.SetActive(viewName == "FileView");
     }
 }
